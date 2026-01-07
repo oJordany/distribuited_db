@@ -1,38 +1,71 @@
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
-
-class DataRecord(Base):
-    __tablename__ = 'records'
-    id = Column(Integer, primary_key=True)
-    content = Column(String(255))
+import uuid
 
 class DBManager:
     def __init__(self, db_uri):
         self.engine = create_engine(db_uri)
-        Base.metadata.create_all(self.engine) # Cria a tabela se não existir
-        self.Session = sessionmaker(bind=self.engine)
+        self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
+        # Dicionário para manter sessões abertas aguardando o 2PC
+        self.active_transactions = {}
 
-    def execute_query(self, query: str):
-        # Implementação simplificada para SELECT
+    def execute_select(self, query: str):
+        """Executa consultas de leitura imediatamente."""
         session = self.Session()
         try:
-            if query.upper().startswith("SELECT"):
-                # Exemplo: session.execute(text(query)).fetchall()
-                print(f"DEBUG: Executando SELECT: {query}")
-                return [{"id": 1, "content": "Dados simulados"}]
-            
-            # Para INSERT/UPDATE/DELETE, exige lógica de 2PC
-            # Retorna o objeto Session para uso no 2PC
-            return session
+            result = session.execute(text(query))
+            return [dict(row._mapping) for row in result]
+        except Exception as e:
+            print(f"Erro no SELECT: {e}")
+            return None
+        finally:
+            session.close()
+
+    def prepare(self, query: str):
+        """
+        FASE 1: Executa a query mas não commita. 
+        Retorna um transaction_id para referência futura.
+        """
+        session = self.Session()
+        try:
+            # Inicia a transação e executa a query DML
+            session.execute(text(query))
+            # Gera um ID único para esta transação distribuída
+            tid = str(uuid.uuid4())
+            self.active_transactions[tid] = session
+            print(f"[2PC-PREPARE] Transação {tid} preparada com sucesso.")
+            return tid
         except Exception as e:
             session.rollback()
-            raise e
-        finally:
-            # Não fechar a sessão se for para 2PC
-            if query.upper().startswith("SELECT"):
-                session.close()
+            session.close()
+            print(f"[2PC-PREPARE] Falha ao preparar query: {e}")
+            return None
 
-    # Métodos para 2PC (prepare, commit, rollback) seriam adicionados aqui...
+    def commit(self, tid: str):
+        """FASE 2: Efetiva a transação no banco de dados."""
+        session = self.active_transactions.get(tid)
+        if session:
+            try:
+                session.commit()
+                print(f"[2PC-COMMIT] Transação {tid} efetivada.")
+                return True
+            except Exception as e:
+                print(f"[2PC-COMMIT] Erro ao commitar {tid}: {e}")
+                return False
+            finally:
+                session.close()
+                del self.active_transactions[tid]
+        return False
+
+    def rollback(self, tid: str):
+        """FASE 2 (Erro): Desfaz as alterações da transação."""
+        session = self.active_transactions.get(tid)
+        if session:
+            try:
+                session.rollback()
+                print(f"[2PC-ROLLBACK] Transação {tid} desfeita.")
+                return True
+            finally:
+                session.close()
+                del self.active_transactions[tid]
+        return False
