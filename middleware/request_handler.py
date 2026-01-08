@@ -4,10 +4,11 @@ import threading
 from middleware.ddb_mediator import DDBMediator
 
 class RequestHandler:
-    def __init__(self, host, port):
+    def __init__(self, host, port, middleware_node_id: int = 0):
         self.host = host
         self.port = port
-        self.mediator = DDBMediator(middleware_node_id=99) # ID fictício para o middleware
+        # Usa um ID baixo (0) por padrão para que o middleware não se torne automaticamente coordenador
+        self.mediator = DDBMediator(middleware_node_id=middleware_node_id)
         self.is_running = True
 
     def start(self):
