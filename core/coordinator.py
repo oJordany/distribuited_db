@@ -28,7 +28,7 @@ class BullyCoordinator:
         any_response = False
         for nid in higher_nodes:
             response = self._send_to_node(nid, "ELECTION", {"sender": self.node_id})
-            if response and response.get("status") == "OK":
+            if response and response.get("type") == "ANSWER" and response.get("payload", {}).get("status") == "OK":
                 any_response = True
         
         if not any_response:
@@ -76,9 +76,10 @@ class BullyCoordinator:
         for nid in self.nodes_config.keys():
             # Envia PREPARE para todos os nós (inclusive ele mesmo)
             resp = self._send_to_node(nid, "PREPARE", {"query": query})
-            
-            if resp and resp.get("status") == "PREPARED":
-                prepared_nodes[nid] = resp.get("tid")
+
+            payload = resp.get("payload", {}) if resp else {}
+            if resp and payload.get("status") == "PREPARED":
+                prepared_nodes[nid] = payload.get("tid")
                 print(f"[2PC] Nó {nid} está PREPARADO.")
             else:
                 print(f"[2PC] Nó {nid} FALHOU no prepare. Abortando tudo...")

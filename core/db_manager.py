@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 import uuid
+from datetime import date, datetime, time
+from decimal import Decimal
 
 class DBManager:
     def __init__(self, db_uri):
@@ -14,7 +16,11 @@ class DBManager:
         session = self.Session()
         try:
             result = session.execute(text(query))
-            return [dict(row._mapping) for row in result]
+            rows = []
+            for row in result:
+                row_dict = dict(row._mapping)
+                rows.append({k: self._jsonify_value(v) for k, v in row_dict.items()})
+            return rows
         except Exception as e:
             print(f"Erro no SELECT: {e}")
             return None
@@ -69,3 +75,10 @@ class DBManager:
                 session.close()
                 del self.active_transactions[tid]
         return False
+
+    def _jsonify_value(self, value):
+        if isinstance(value, (datetime, date, time)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        return value

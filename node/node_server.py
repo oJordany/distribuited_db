@@ -13,19 +13,36 @@ class NodeServer:
         self.coord_manager = BullyCoordinator(node_id, nodes_config) 
         self.is_running = True
         self.db_manager = DBManager(self.config[2])
+        self._startup_error = None
+        self._listen_ready = threading.Event()
 
     def run(self):
-        # Thread para Heartbeat 
-        threading.Thread(target=self._heartbeat_sender, daemon=True).start()
-        
         # Thread para escutar conexões
+        self._startup_error = None
+        self._listen_ready.clear()
         server_thread = threading.Thread(target=self._listen)
         server_thread.start()
+        self._listen_ready.wait(timeout=2)
+        if self._startup_error:
+            self.is_running = False
+            raise self._startup_error
+
+        # Thread para Heartbeat 
+        threading.Thread(target=self._heartbeat_sender, daemon=True).start()
 
     def _listen(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", self.config[1]))
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("0.0.0.0", self.config[1]))
+            except OSError:
+                self._startup_error = RuntimeError(
+                    f"Porta {self.config[1]} ja em uso. Pare outro processo ou mude a porta em utils/config.py."
+                )
+                self._listen_ready.set()
+                return
             s.listen()
+            self._listen_ready.set()
             print(f"Nó {self.node_id} ouvindo em {self.config[1]}...")
             
             while self.is_running:
@@ -62,6 +79,15 @@ class NodeServer:
                     # Respondemos ao batimento cardíaco para confirmar que estamos vivos
                     conn.sendall(create_message("ACK", {"status": "alive"}).encode())
 
+                elif m_type == "GET_COORDINATOR":
+                    # Informa quem o nó entende como coordenador atual
+                    conn.sendall(
+                        create_message(
+                            "COORDINATOR_INFO",
+                            {"coordinator_id": self.coord_manager.coordinator_id},
+                        ).encode()
+                    )
+
                 # ==========================================
                 # Transações e 2PC
                 # ==========================================
@@ -84,6 +110,27 @@ class NodeServer:
                 elif m_type == "EXECUTE_QUERY":
                     result = self.db_manager.execute_select(payload['query'])
                     conn.sendall(create_message("SUCCESS", {"result": result}).encode())
+
+                elif m_type == "EXECUTE_2PC":
+                    if (
+                        self.coord_manager.coordinator_id is not None
+                        and self.coord_manager.coordinator_id != self.node_id
+                    ):
+                        conn.sendall(
+                            create_message(
+                                "TX_RESULT",
+                                {"status": "FAIL", "message": "Este nó não é o coordenador."},
+                            ).encode()
+                        )
+                    else:
+                        result = self.coord_manager.execute_distributed_transaction(payload.get("query", ""))
+                        status = "SUCCESS" if result.get("status") == "SUCCESS" else "FAIL"
+                        conn.sendall(
+                            create_message(
+                                "TX_RESULT",
+                                {"status": status, "message": result.get("message")},
+                            ).encode()
+                        )
 
             except Exception as e:
                 print(f"[ERRO] Falha no processamento da mensagem: {e}")
