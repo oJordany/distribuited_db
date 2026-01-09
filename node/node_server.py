@@ -1,92 +1,152 @@
 import socket
 import threading
-import json
 import time
-from core.db_manager import DBManager, DataRecord
-from utils.config import DDB_NODES, HEARTBEAT_INTERVAL
-from utils.checksum import calculate_checksum # Assumindo que você tem uma função checksum
+from utils.network_helper import verify_message, create_message
+from core.coordinator import BullyCoordinator
+from core.db_manager import DBManager
 
 class NodeServer:
-    def __init__(self, node_id: int):
+    def __init__(self, node_id, nodes_config):
         self.node_id = node_id
-        self.host, self.port, db_uri = DDB_NODES[node_id]
-        self.db_manager = DBManager(db_uri)
-        self.is_active = True
-        self.coordinator_id = 1 # Coordenador inicial
+        self.config = nodes_config[node_id]
+        self.all_configs = nodes_config
+        self.coord_manager = BullyCoordinator(node_id, nodes_config) 
+        self.is_running = True
+        self.db_manager = DBManager(self.config[2])
+        self._startup_error = None
+        self._listen_ready = threading.Event()
 
-    def _handle_client(self, conn, addr):
-        # Recebe a requisição do Middleware
-        try:
-            data_raw = conn.recv(4096).decode('utf-8')
-            request = json.loads(data_raw)
-            print(f"Nó {self.node_id}: Recebeu requisição: {request['type']}")
+    def run(self):
+        # Thread para escutar conexões
+        self._startup_error = None
+        self._listen_ready.clear()
+        server_thread = threading.Thread(target=self._listen)
+        server_thread.start()
+        self._listen_ready.wait(timeout=2)
+        if self._startup_error:
+            self.is_running = False
+            raise self._startup_error
 
-            # 1. Verificar Integridade (Checksum)
-            if request['checksum'] != calculate_checksum(request['payload']):
-                response = {"status": "ERROR", "message": "Checksum inválido."}
-                conn.sendall(json.dumps(response).encode('utf-8'))
-                return
+        # Thread para Heartbeat 
+        threading.Thread(target=self._heartbeat_sender, daemon=True).start()
 
-            # 2. Executar Query / 2PC (Foco da Pessoa 2)
-            if request['type'] == 'EXECUTE_QUERY':
-                query = request['payload']['query']
-                result = self.db_manager.execute_query(query)
-                
-                # Se for SELECT
-                if isinstance(result, list): 
-                    response = {
-                        "status": "SUCCESS", 
-                        "result": result, 
-                        "executed_on": self.node_id
-                    }
-                else: # Se for DML (exigirá 2PC)
-                    response = {"status": "PREPARED", "transaction_id": "T123"} 
-            
-            # ... Lógica para ELEICAO, REPLICACAO, etc ...
-            
-            response['checksum'] = calculate_checksum(response) # Adiciona checksum de retorno
-            conn.sendall(json.dumps(response).encode('utf-8'))
-
-        except Exception as e:
-            print(f"Erro no Nó {self.node_id}: {e}")
-            conn.sendall(json.dumps({"status": "ERROR", "message": str(e)}).encode('utf-8'))
-        finally:
-            conn.close()
-
-    def start_server(self):
-        # Inicia o servidor de sockets
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind((self.host, self.port))
-        s.listen(5)
-        print(f"*** Nó DDB {self.node_id} ativo em {self.host}:{self.port} ***")
-
-        # Inicia thread de Heartbeat (Padrão Observer/Pessoa 1)
-        threading.Thread(target=self._send_heartbeats, daemon=True).start()
-
-        while True:
-            conn, addr = s.accept()
-            threading.Thread(target=self._handle_client, args=(conn, addr)).start()
-
-    def _send_heartbeats(self):
-        # Envia periodicamente uma mensagem para o coordenador
-        while self.is_active:
+    def _listen(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                # Na prática, se conecta ao Middleware/Coordenador
-                heartbeat_msg = {
-                    "type": "HEARTBEAT",
-                    "sender_id": self.node_id,
-                    "status": "UP"
-                }
-                
-                # Exemplo: Enviar para o Coordenador atual (ID 1)
-                # O real Coordenador escutará e manterá o status UP
-                
-                time.sleep(HEARTBEAT_INTERVAL)
-            except Exception as e:
-                print(f"Erro no heartbeat do Nó {self.node_id}: {e}")
+                s.bind(("0.0.0.0", self.config[1]))
+            except OSError:
+                self._startup_error = RuntimeError(
+                    f"Porta {self.config[1]} ja em uso. Pare outro processo ou mude a porta em utils/config.py."
+                )
+                self._listen_ready.set()
+                return
+            s.listen()
+            self._listen_ready.set()
+            print(f"Nó {self.node_id} ouvindo em {self.config[1]}...")
+            
+            while self.is_running:
+                conn, addr = s.accept()
+                threading.Thread(target=self._handle_connection, args=(conn,)).start()
 
-# Ponto de entrada
-if __name__ == '__main__':
-    node_id = int(input("Digite o ID do Nó (1, 2, ou 3): "))
-    server = NodeServer(node_id)
-    server.start_server()
+    def _handle_connection(self, conn):
+        with conn:
+            try:
+                # Recebe e valida a mensagem usando o Checksum da Pessoa 1
+                raw_data = conn.recv(4096).decode()
+                if not raw_data:
+                    return
+                
+                data = verify_message(raw_data)
+                m_type = data['type']
+                payload = data['payload']
+
+                # ==========================================
+                # Eleição e Bully
+                # ==========================================
+                if m_type == "ELECTION":
+                    # Se um nó menor inicia eleição, respondemos OK e iniciamos a nossa
+                    conn.sendall(create_message("ANSWER", {"status": "OK"}).encode())
+                    threading.Thread(target=self.coord_manager.start_election).start()
+
+                elif m_type == "COORDINATOR_VICTORY":
+                    # Um novo líder se proclamou
+                    self.coord_manager.coordinator_id = payload['leader']
+                    self.coord_manager.is_electing = False
+                    print(f"[REDE] Novo Coordenador reconhecido: {payload['leader']}")
+
+                elif m_type == "HEARTBEAT":
+                    # Respondemos ao batimento cardíaco para confirmar que estamos vivos
+                    conn.sendall(create_message("ACK", {"status": "alive"}).encode())
+
+                elif m_type == "GET_COORDINATOR":
+                    # Informa quem o nó entende como coordenador atual
+                    conn.sendall(
+                        create_message(
+                            "COORDINATOR_INFO",
+                            {"coordinator_id": self.coord_manager.coordinator_id},
+                        ).encode()
+                    )
+
+                # ==========================================
+                # Transações e 2PC
+                # ==========================================
+                elif m_type == "PREPARE":
+                    tid = self.db_manager.prepare(payload['query'])
+                    status = "PREPARED" if tid else "FAIL"
+                    conn.sendall(create_message("ACK", {"status": status, "tid": tid}).encode())
+
+                elif m_type == "COMMIT":
+                    success = self.db_manager.commit(payload['tid'])
+                    conn.sendall(create_message("ACK", {"status": "SUCCESS" if success else "FAIL"}).encode())
+
+                elif m_type == "ROLLBACK":
+                    self.db_manager.rollback(payload['tid'])
+                    conn.sendall(create_message("ACK", {"status": "ROLLED_BACK"}).encode())
+
+                # ==========================================
+                # Middleware
+                # ==========================================
+                elif m_type == "EXECUTE_QUERY":
+                    result = self.db_manager.execute_select(payload['query'])
+                    conn.sendall(create_message("SUCCESS", {"result": result}).encode())
+
+                elif m_type == "EXECUTE_2PC":
+                    if (
+                        self.coord_manager.coordinator_id is not None
+                        and self.coord_manager.coordinator_id != self.node_id
+                    ):
+                        conn.sendall(
+                            create_message(
+                                "TX_RESULT",
+                                {"status": "FAIL", "message": "Este nó não é o coordenador."},
+                            ).encode()
+                        )
+                    else:
+                        result = self.coord_manager.execute_distributed_transaction(payload.get("query", ""))
+                        status = "SUCCESS" if result.get("status") == "SUCCESS" else "FAIL"
+                        conn.sendall(
+                            create_message(
+                                "TX_RESULT",
+                                {"status": status, "message": result.get("message")},
+                            ).encode()
+                        )
+
+            except Exception as e:
+                print(f"[ERRO] Falha no processamento da mensagem: {e}")
+
+
+    def _heartbeat_sender(self):
+        """Informa periodicamente que o nó está ativo enviando para o coordenador."""
+        while self.is_running:
+            time.sleep(5)
+            target_id = self.coord_manager.coordinator_id
+            if target_id == self.node_id: continue # Sou o coordenador, não preciso me avisar
+
+            host, port, _ = self.all_configs[target_id]
+            try:
+                with socket.create_connection((host, port), timeout=2) as s:
+                    s.sendall(create_message('HEARTBEAT', {'node': self.node_id}).encode())
+            except:
+                print(f"Coordenador {target_id} não respondeu!")
+                self.coord_manager.start_election() # Inicia eleição se o coordenador falhar

@@ -1,38 +1,108 @@
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
-
-class DataRecord(Base):
-    __tablename__ = 'records'
-    id = Column(Integer, primary_key=True)
-    content = Column(String(255))
+import uuid
+from datetime import date, datetime, time
+from decimal import Decimal
+from node.replication_log import Base, ReplicationLog
 
 class DBManager:
     def __init__(self, db_uri):
         self.engine = create_engine(db_uri)
-        Base.metadata.create_all(self.engine) # Cria a tabela se não existir
-        self.Session = sessionmaker(bind=self.engine)
+        self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
+        # Dicionário para manter sessões abertas aguardando o 2PC
+        # {tid: {"session": Session, "query": str}}
+        self.active_transactions = {}
+        Base.metadata.create_all(self.engine)
 
-    def execute_query(self, query: str):
-        # Implementação simplificada para SELECT
+    def execute_select(self, query: str):
+        """Executa consultas de leitura imediatamente."""
         session = self.Session()
         try:
-            if query.upper().startswith("SELECT"):
-                # Exemplo: session.execute(text(query)).fetchall()
-                print(f"DEBUG: Executando SELECT: {query}")
-                return [{"id": 1, "content": "Dados simulados"}]
-            
-            # Para INSERT/UPDATE/DELETE, exige lógica de 2PC
-            # Retorna o objeto Session para uso no 2PC
-            return session
+            result = session.execute(text(query))
+            rows = []
+            for row in result:
+                row_dict = dict(row._mapping)
+                rows.append({k: self._jsonify_value(v) for k, v in row_dict.items()})
+            return rows
+        except Exception as e:
+            print(f"Erro no SELECT: {e}")
+            return None
+        finally:
+            session.close()
+
+    def prepare(self, query: str):
+        """
+        FASE 1: Executa a query mas não commita. 
+        Retorna um transaction_id para referência futura.
+        """
+        session = self.Session()
+        try:
+            # Inicia a transação e executa a query DML
+            session.execute(text(query))
+            # Gera um ID único para esta transação distribuída
+            tid = str(uuid.uuid4())
+            self.active_transactions[tid] = {"session": session, "query": query}
+            print(f"[2PC-PREPARE] Transação {tid} preparada com sucesso.")
+            self._log_replication(query, "PREPARED")
+            return tid
         except Exception as e:
             session.rollback()
-            raise e
-        finally:
-            # Não fechar a sessão se for para 2PC
-            if query.upper().startswith("SELECT"):
-                session.close()
+            session.close()
+            print(f"[2PC-PREPARE] Falha ao preparar query: {e}")
+            self._log_replication(query, "PREPARE_FAIL")
+            return None
 
-    # Métodos para 2PC (prepare, commit, rollback) seriam adicionados aqui...
+    def commit(self, tid: str):
+        """FASE 2: Efetiva a transação no banco de dados."""
+        entry = self.active_transactions.get(tid)
+        if entry:
+            session = entry["session"]
+            query = entry.get("query")
+            try:
+                session.commit()
+                print(f"[2PC-COMMIT] Transação {tid} efetivada.")
+                self._log_replication(query, "COMMITTED")
+                return True
+            except Exception as e:
+                print(f"[2PC-COMMIT] Erro ao commitar {tid}: {e}")
+                self._log_replication(query, "COMMIT_FAIL")
+                return False
+            finally:
+                session.close()
+                del self.active_transactions[tid]
+        return False
+
+    def rollback(self, tid: str):
+        """FASE 2 (Erro): Desfaz as alterações da transação."""
+        entry = self.active_transactions.get(tid)
+        if entry:
+            session = entry["session"]
+            query = entry.get("query")
+            try:
+                session.rollback()
+                print(f"[2PC-ROLLBACK] Transação {tid} desfeita.")
+                self._log_replication(query, "ROLLED_BACK")
+                return True
+            finally:
+                session.close()
+                del self.active_transactions[tid]
+        return False
+
+    def _jsonify_value(self, value):
+        if isinstance(value, (datetime, date, time)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        return value
+
+    def _log_replication(self, query: str, status: str):
+        session = self.Session()
+        try:
+            entry = ReplicationLog(query_text=query, status=status)
+            session.add(entry)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            print(f"[REPLICATION_LOG] Falha ao registrar log: {e}")
+        finally:
+            session.close()
