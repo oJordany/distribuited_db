@@ -3,13 +3,16 @@ from sqlalchemy.orm import sessionmaker
 import uuid
 from datetime import date, datetime, time
 from decimal import Decimal
+from node.replication_log import Base, ReplicationLog
 
 class DBManager:
     def __init__(self, db_uri):
         self.engine = create_engine(db_uri)
         self.Session = sessionmaker(bind=self.engine, autocommit=False, autoflush=False)
         # Dicionário para manter sessões abertas aguardando o 2PC
+        # {tid: {"session": Session, "query": str}}
         self.active_transactions = {}
+        Base.metadata.create_all(self.engine)
 
     def execute_select(self, query: str):
         """Executa consultas de leitura imediatamente."""
@@ -38,25 +41,31 @@ class DBManager:
             session.execute(text(query))
             # Gera um ID único para esta transação distribuída
             tid = str(uuid.uuid4())
-            self.active_transactions[tid] = session
+            self.active_transactions[tid] = {"session": session, "query": query}
             print(f"[2PC-PREPARE] Transação {tid} preparada com sucesso.")
+            self._log_replication(query, "PREPARED")
             return tid
         except Exception as e:
             session.rollback()
             session.close()
             print(f"[2PC-PREPARE] Falha ao preparar query: {e}")
+            self._log_replication(query, "PREPARE_FAIL")
             return None
 
     def commit(self, tid: str):
         """FASE 2: Efetiva a transação no banco de dados."""
-        session = self.active_transactions.get(tid)
-        if session:
+        entry = self.active_transactions.get(tid)
+        if entry:
+            session = entry["session"]
+            query = entry.get("query")
             try:
                 session.commit()
                 print(f"[2PC-COMMIT] Transação {tid} efetivada.")
+                self._log_replication(query, "COMMITTED")
                 return True
             except Exception as e:
                 print(f"[2PC-COMMIT] Erro ao commitar {tid}: {e}")
+                self._log_replication(query, "COMMIT_FAIL")
                 return False
             finally:
                 session.close()
@@ -65,11 +74,14 @@ class DBManager:
 
     def rollback(self, tid: str):
         """FASE 2 (Erro): Desfaz as alterações da transação."""
-        session = self.active_transactions.get(tid)
-        if session:
+        entry = self.active_transactions.get(tid)
+        if entry:
+            session = entry["session"]
+            query = entry.get("query")
             try:
                 session.rollback()
                 print(f"[2PC-ROLLBACK] Transação {tid} desfeita.")
+                self._log_replication(query, "ROLLED_BACK")
                 return True
             finally:
                 session.close()
@@ -82,3 +94,15 @@ class DBManager:
         if isinstance(value, Decimal):
             return float(value)
         return value
+
+    def _log_replication(self, query: str, status: str):
+        session = self.Session()
+        try:
+            entry = ReplicationLog(query_text=query, status=status)
+            session.add(entry)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            print(f"[REPLICATION_LOG] Falha ao registrar log: {e}")
+        finally:
+            session.close()

@@ -15,6 +15,11 @@ INSERT INTO products (name, price) VALUES
 
 SELECT * FROM products;
 
+-- Replication logs
+SELECT id, query_text, status, executed_at
+FROM replication_logs
+ORDER BY executed_at DESC;
+
 UPDATE products
 SET price = 89.90
 WHERE name = 'Mouse';

@@ -1,5 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
+from sqlalchemy import Column, DateTime, Integer, String
+from sqlalchemy.orm import declarative_base
+
+Base = declarative_base()
+
 
 class ReplicationLog(Base):
     __tablename__ = 'replication_logs'

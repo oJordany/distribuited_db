@@ -1,11 +1,31 @@
-# DDB Middleware
+# 🧩 DDB Middleware - Banco Distribuido
+
+<p align="center">
+  <font size="7">🧩</font> <font size="7">🗃️</font> <font size="7">🔗</font>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.x-blue?logo=python&logoColor=white" alt="Python Version">
+  <img src="https://img.shields.io/badge/Protocol-Bully%20%7C%202PC-orange" alt="Bully | 2PC">
+  <img src="https://img.shields.io/badge/Transport-TCP-green" alt="TCP">
+  <img src="https://img.shields.io/badge/GUI-Tkinter-yellow" alt="Tkinter">
+  <img src="https://img.shields.io/badge/Database-MySQL-4479A1?logo=mysql&logoColor=white" alt="MySQL">
+</p>
 
 Middleware e nos para um banco de dados distribuido com eleicao Bully e suporte a 2PC. Inclui um cliente grafico para enviar consultas SQL via TCP.
 
+## Contexto do projeto
+Projeto da disciplina Laboratorio de Sistemas Distribuidos.
+
+Alunos:
+- Luiz Jordany de Sousa Silva
+- Ivan Luis Gama Grana
+- Syanne Karoline Moreira Tavares
+
 ## Visao geral
 - Cliente envia SQL ao middleware via socket TCP.
-- Middleware encaminha a query para o no coordenador.
-- Nos executam leitura direta e participam do protocolo 2PC para escrita.
+- Middleware descobre o coordenador e encaminha todas as queries a ele.
+- Coordenador executa leituras e replica escritas via 2PC.
 - Eleicao Bully e heartbeat mantem um coordenador ativo.
 
 ## Como executar
@@ -37,7 +57,7 @@ python client/client_app.py
 ```
 
 ## Fluxo de funcionamento
-O cliente envia uma query ao middleware, que utiliza o `DDBMediator` para descobrir o coordenador e encaminhar a solicitacao. O coordenador pode executar leituras localmente e, para escrita, o fluxo de 2PC esta disponivel via `PREPARE`/`COMMIT`/`ROLLBACK`. Os nos enviam heartbeat periodico para detectar falhas e disparar eleicao Bully quando necessario.
+O cliente envia uma query ao middleware, que utiliza o `DDBMediator` para descobrir o coordenador e encaminhar a solicitacao. Todas as consultas vao para o coordenador: leituras usam `EXECUTE_QUERY`, e escritas usam `EXECUTE_2PC`, com replicacao via `PREPARE`/`COMMIT`/`ROLLBACK`. Os nos enviam heartbeat periodico para detectar falhas e disparar eleicao Bully quando necessario.
 
 ## Estrutura de modulos
 
@@ -73,8 +93,12 @@ O cliente envia uma query ao middleware, que utiliza o `DDBMediator` para descob
 - `utils/checksum.py`: utilitario de MD5 (nao usado no fluxo principal).
 - `utils/__init__.py`: marca o pacote utils.
 
+## tests/
+- `tests/sample_queries.sql`: exemplo de schema e queries para copiar e colar no cliente.
+
 ## Configuracao
 Edite `utils/config.py` para apontar cada no para seu banco MySQL. Cada entrada em `DDB_NODES` segue o formato `(IP, Porta, DB_URI)`.
+Obs: a porta e do servidor do no, enquanto a porta do MySQL fica dentro da `DB_URI`.
 
 ### Execucao em 3 PCs (laboratorio)
 - Cada PC roda 1 no e 1 banco local.
@@ -111,10 +135,19 @@ DDB_NODES = {
 ```
 
 ## Protocolo de rede
-As mensagens sao JSON com `type`, `payload` e `checksum`. O checksum usa MD5 do payload para validar integridade. Tipos principais: `ELECTION`, `ANSWER`, `COORDINATOR_VICTORY`, `HEARTBEAT`, `EXECUTE_QUERY`, `PREPARE`, `COMMIT`, `ROLLBACK`.
+As mensagens sao JSON com `type`, `payload` e `checksum`. O checksum usa MD5 do payload para validar integridade. Tipos principais: `ELECTION`, `ANSWER`, `COORDINATOR_VICTORY`, `HEARTBEAT`, `GET_COORDINATOR`, `COORDINATOR_INFO`, `EXECUTE_QUERY`, `EXECUTE_2PC`, `TX_RESULT`, `PREPARE`, `COMMIT`, `ROLLBACK`.
 
 ## Observacoes
-Se o middleware retornar "Nenhum coordenador eleito", o campo `coordinator_id` ainda nao foi definido no mediator. Garanta que os nos iniciem a eleicao e, se necessario, estenda o middleware para receber notificacoes de lideranca.
-- O middleware hoje nao recebe automaticamente o ID do coordenador; ele depende de `BullyCoordinator.coordinator_id` local. Uma melhoria comum e expor um endpoint para consultar o lider atual ou propagar o lider para o middleware.
-- O `ReplicationLog` em `node/replication_log.py` depende de uma `Base` declarativa que nao esta incluida; use apenas se completar esse modelo.
-- O fluxo 2PC esta implementado em `core/coordinator.py`, mas o middleware encaminha toda query ao coordenador usando `EXECUTE_QUERY` (leitura). Para escrita distribuida, integre `execute_distributed_transaction` no mediator.
+Se o middleware retornar "Nenhum coordenador eleito", os nos nao reportaram um lider ativo. Verifique se algum no completou a eleicao e se as portas estao acessiveis.
+- O middleware descobre o coordenador consultando os nos com `GET_COORDINATOR`.
+- Escritas sao executadas no coordenador via `EXECUTE_2PC` e replicadas com 2PC.
+- Os nos registram um log de replicacao na tabela `replication_logs` com status das transacoes.
+
+## Consultas de exemplo
+O arquivo `tests/sample_queries.sql` inclui comandos para criar tabela, inserir dados, atualizar, remover, consultar e ver os logs de replicacao. Para consultar os logs diretamente:
+
+```sql
+SELECT id, query_text, status, executed_at
+FROM replication_logs
+ORDER BY executed_at DESC;
+```
