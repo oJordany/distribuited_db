@@ -9,7 +9,7 @@ class BullyCoordinator:
         self.nodes_config = nodes_config
         self.coordinator_id = None
         self.is_electing = False
-        self.lock = threading.Lock()
+        self.lock = threading.Lock() # mutex para garantir que apenas uma eleição ocorra por vez
 
     def start_election(self):
         """Fase 1: Envia ELECTION para todos os nós com ID maior."""
@@ -35,7 +35,7 @@ class BullyCoordinator:
             self.proclaim_victory()
         else:
             # Aguarda um tempo para o nó superior proclamar vitória. 
-            # Se não houver resposta em X segundos, reinicia.
+            # Se não houver resposta em 10 segundos, reinicia.
             threading.Timer(10.0, self._check_if_leader_elected).start()
 
     def proclaim_victory(self):

@@ -8,15 +8,14 @@ class DDBMediator:
     def __init__(self, middleware_node_id):
         # O Middleware também age como um observador no Bully
         self.coordinator = BullyCoordinator(middleware_node_id, DDB_NODES)
-        self.active_nodes = set(DDB_NODES.keys()) # Simplificação: assume todos ativos no início
+        self.active_nodes = set(DDB_NODES.keys()) 
 
     def handle_client_query(self, query: str):
         # Diferencia leitura de escrita para acionar o 2PC via coordenador.
         if not query:
             return {"status": "ERROR", "message": "Query vazia."}
 
-        if self.coordinator.coordinator_id is None:
-            self._discover_coordinator()
+        self._discover_coordinator()
 
         target_node = self.coordinator.coordinator_id
         if target_node is None:

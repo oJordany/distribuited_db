@@ -30,7 +30,7 @@ class RequestHandler:
             request = json.loads(data)
             query = request.get("query")
             
-            # Chama o Mediator para processar a query (Pessoa 3)
+            # Chama o Mediator para processar a query 
             response = self.mediator.handle_client_query(query)
             
             conn.sendall(json.dumps(response).encode())
