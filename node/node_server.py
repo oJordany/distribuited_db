@@ -14,7 +14,7 @@ class NodeServer:
         self.is_running = True
         self.db_manager = DBManager(self.config[2])
         self._startup_error = None
-        self._listen_ready = threading.Event()
+        self._listen_ready = threading.Event() # obj de sincronização entre threads
 
     def run(self):
         # Thread para escutar conexões
@@ -22,7 +22,7 @@ class NodeServer:
         self._listen_ready.clear()
         server_thread = threading.Thread(target=self._listen)
         server_thread.start()
-        self._listen_ready.wait(timeout=2)
+        self._listen_ready.wait(timeout=2) # espera até a thread de escuta estar pronta
         if self._startup_error:
             self.is_running = False
             raise self._startup_error
@@ -32,9 +32,10 @@ class NodeServer:
 
     def _listen(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # configurando opções do socket -> evita erro de porta em uso quando a porta é reutilizada após fechar e abrir rápido
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                s.bind(("0.0.0.0", self.config[1]))
+                s.bind(("0.0.0.0", self.config[1])) # associa socket a endereço local para escuta
             except OSError:
                 self._startup_error = RuntimeError(
                     f"Porta {self.config[1]} ja em uso. Pare outro processo ou mude a porta em utils/config.py."
@@ -52,8 +53,8 @@ class NodeServer:
     def _handle_connection(self, conn):
         with conn:
             try:
-                # Recebe e valida a mensagem usando o Checksum da Pessoa 1
-                raw_data = conn.recv(4096).decode()
+                # Recebe e valida a mensagem usando o Checksum
+                raw_data = conn.recv(4096).decode() # decode() para string
                 if not raw_data:
                     return
                 
@@ -65,7 +66,7 @@ class NodeServer:
                 # Eleição e Bully
                 # ==========================================
                 if m_type == "ELECTION":
-                    # Se um nó menor inicia eleição, respondemos OK e iniciamos a nossa
+                    # Se um nó menor inicia eleição, respondemos OK e iniciamos a nossa eleição
                     conn.sendall(create_message("ANSWER", {"status": "OK"}).encode())
                     threading.Thread(target=self.coord_manager.start_election).start()
 

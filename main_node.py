@@ -24,7 +24,7 @@ def main():
     print(f"--- Iniciando Nó Distributed Database (ID: {node_id}) ---")
 
     # Inicializa o servidor do nó
-    # A Pessoa 1 garante a infraestrutura de rede e eleição aqui
+    # infraestrutura de rede e eleição aqui
     node = NodeServer(node_id, DDB_NODES)
 
     try:
